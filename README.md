@@ -1,9 +1,9 @@
 # Multimodal Emotion Recognition (MER) with Bidirectional Cross-Attention
 
 ## Overview
-This repository contains a state-of-the-art (SOTA) Multimodal Emotion Recognition (MER) pipeline trained on the CMU-MOSEI dataset. [cite_start]The CMU-MOSEI dataset contains more than 23,500 annotated YouTube monologue segments[cite: 52, 526]. 
+This repository contains a state-of-the-art (SOTA) Multimodal Emotion Recognition (MER) pipeline trained on the CMU-MOSEI dataset. [cite_start]The CMU-MOSEI dataset contains more than 23,500 annotated YouTube monologue segments. 
 
-To effectively process this data, our model introduces an intermediate transformer-based fusion mechanism. [cite_start]By abandoning legacy static features (like COVAREP and FACET) in favor of dynamic foundation models, and replacing naive data truncation with imbalance-aware loss functions, this architecture robustly predicts continuous emotion intensities across six core categories: Happy, Sad, Angry, Fearful, Disgust, and Surprised[cite: 63, 527].
+To effectively process this data, our model introduces an intermediate transformer-based fusion mechanism. [cite_start]By abandoning legacy static features (like COVAREP and FACET) in favor of dynamic foundation models, and replacing naive data truncation with imbalance-aware loss functions, this architecture robustly predicts continuous emotion intensities across six core categories: Happy, Sad, Angry, Fearful, Disgust, and Surprised.
 
 ## Key Features & Upgrades
 * **Full Data Utilization:** We keep all valid utterances instead of deleting data to downsample majority classes. Extreme dataset imbalance is handled algorithmically via Inverse-Sqrt Weighted Huber and MSE loss functions.
