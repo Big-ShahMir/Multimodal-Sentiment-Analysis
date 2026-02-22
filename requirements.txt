@@ -1,0 +1,13 @@
+# Core
+torch>=2.0
+torchvision>=0.15
+torchaudio>=2.0
+# Training
+lightning>=2.0
+# Or: pytorch-lightning>=2.0
+# Audio/video feature extractors
+transformers>=4.30
+# Data & metrics
+pandas>=1.5
+numpy>=1.23
+torchmetrics>=1.0

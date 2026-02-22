@@ -30,6 +30,7 @@ try:
         CollateConfig,
         DataLoaderConfig,
         build_split_dataloaders,
+        build_split_dataloaders_pkl,
     )
     from .dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig
 except ImportError:
@@ -38,6 +39,7 @@ except ImportError:
         CollateConfig,
         DataLoaderConfig,
         build_split_dataloaders,
+        build_split_dataloaders_pkl,
     )
     from dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig  # type: ignore[no-redef]
 
@@ -115,6 +117,61 @@ class MERDataModule(LightningDataModule):
             collate_cfg=self.collate_cfg,
             target_columns=self.target_columns,
             strict_path_check=self.strict_path_check,
+        )
+
+    def train_dataloader(self) -> DataLoader[BatchDict]:
+        if self._dataloaders is None:
+            self.setup(stage="fit")
+        assert self._dataloaders is not None
+        return self._dataloaders["train"]
+
+    def val_dataloader(self) -> DataLoader[BatchDict]:
+        if self._dataloaders is None:
+            self.setup(stage="fit")
+        assert self._dataloaders is not None
+        return self._dataloaders["val"]
+
+    def test_dataloader(self) -> DataLoader[BatchDict]:
+        if self._dataloaders is None:
+            self.setup(stage="test")
+        assert self._dataloaders is not None
+        return self._dataloaders["test"]
+
+
+class MERDataModulePkl(LightningDataModule):
+    """DataModule for Zenodo processed_mosei.pkl (no manifest, no raw audio/video files)."""
+
+    def __init__(
+        self,
+        pkl_path: Path,
+        train_loader_cfg: DataLoaderConfig,
+        eval_loader_cfg: Optional[DataLoaderConfig] = None,
+        collate_cfg: Optional[CollateConfig] = None,
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        seed: int = 561,
+    ) -> None:
+        super().__init__()
+        self.pkl_path = Path(pkl_path)
+        self.train_loader_cfg = train_loader_cfg
+        self.eval_loader_cfg = eval_loader_cfg
+        self.collate_cfg = collate_cfg
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.seed = seed
+        self._dataloaders: Optional[Dict[SplitName, DataLoader[BatchDict]]] = None
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        if self._dataloaders is not None:
+            return
+        self._dataloaders = build_split_dataloaders_pkl(
+            pkl_path=self.pkl_path,
+            train_loader_cfg=self.train_loader_cfg,
+            eval_loader_cfg=self.eval_loader_cfg,
+            collate_cfg=self.collate_cfg,
+            train_ratio=self.train_ratio,
+            val_ratio=self.val_ratio,
+            seed=self.seed,
         )
 
     def train_dataloader(self) -> DataLoader[BatchDict]:

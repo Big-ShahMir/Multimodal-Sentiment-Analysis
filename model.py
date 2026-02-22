@@ -41,7 +41,7 @@ class SinusoidalPositionalEncoding(nn.Module):
     Standard sinusoidal positional encoding for sequence features.
     """
 
-    def __init__(self, d_model: int, max_len: int = 10000, dropout: float = 0.1) -> None:
+    def __init__(self, d_model: int, max_len: int = 20000, dropout: float = 0.1) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 

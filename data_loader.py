@@ -23,6 +23,7 @@ try:
         AudioFoundationExtractor,
         AudioExtractorConfig,
         DatasetSample,
+        MOSEIPklDataset,
         MultimodalManifestDataset,
         TARGET_COLUMNS,
         VideoExtractorConfig,
@@ -33,6 +34,7 @@ except ImportError:
         AudioFoundationExtractor,
         AudioExtractorConfig,
         DatasetSample,
+        MOSEIPklDataset,
         MultimodalManifestDataset,
         TARGET_COLUMNS,
         VideoExtractorConfig,
@@ -168,10 +170,12 @@ def build_dataloader(
     - If either backbone is set to fine-tune mode (`freeze_backbone=False`),
       use `num_workers=0` to avoid multiprocessing/autograd conflicts.
     """
-    fine_tune_mode = (
-        (not dataset.audio_extractor.freeze_backbone)
-        or (not dataset.video_extractor.freeze_backbone)
-    )
+    fine_tune_mode = False
+    if hasattr(dataset, "audio_extractor") and hasattr(dataset, "video_extractor"):
+        fine_tune_mode = (
+            (not dataset.audio_extractor.freeze_backbone)
+            or (not dataset.video_extractor.freeze_backbone)
+        )
     if fine_tune_mode and dataloader_config.num_workers > 0:
         raise ValueError(
             "Fine-tuning backbones inside Dataset requires num_workers=0. "
@@ -270,3 +274,45 @@ def build_split_dataloaders(
         "val": val_loader,
         "test": test_loader,
     }
+
+
+def build_split_dataloaders_pkl(
+    pkl_path: Path,
+    train_loader_cfg: DataLoaderConfig,
+    eval_loader_cfg: Optional[DataLoaderConfig] = None,
+    collate_cfg: Optional[CollateConfig] = None,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    seed: int = 561,
+) -> Dict[Literal["train", "val", "test"], DataLoader[BatchDict]]:
+    """Build train/val/test DataLoaders from Zenodo processed_mosei.pkl."""
+    eval_loader_cfg = eval_loader_cfg or DataLoaderConfig(
+        batch_size=train_loader_cfg.batch_size,
+        num_workers=train_loader_cfg.num_workers,
+        pin_memory=train_loader_cfg.pin_memory,
+        shuffle=False,
+        drop_last=False,
+        persistent_workers=train_loader_cfg.persistent_workers,
+        prefetch_factor=train_loader_cfg.prefetch_factor,
+    )
+    collate_fn = MultimodalCollator(collate_cfg)
+    pkl_path = Path(pkl_path)
+    train_ds = MOSEIPklDataset(pkl_path, "train", train_ratio=train_ratio, val_ratio=val_ratio, seed=seed)
+    val_ds = MOSEIPklDataset(pkl_path, "val", train_ratio=train_ratio, val_ratio=val_ratio, seed=seed)
+    test_ds = MOSEIPklDataset(pkl_path, "test", train_ratio=train_ratio, val_ratio=val_ratio, seed=seed)
+    use_persistent = train_loader_cfg.persistent_workers and train_loader_cfg.num_workers > 0
+    kwargs: Dict[str, object] = {
+        "batch_size": train_loader_cfg.batch_size,
+        "pin_memory": train_loader_cfg.pin_memory,
+        "drop_last": train_loader_cfg.drop_last,
+        "persistent_workers": use_persistent,
+        "collate_fn": collate_fn,
+    }
+    if train_loader_cfg.num_workers > 0:
+        kwargs["prefetch_factor"] = train_loader_cfg.prefetch_factor
+    train_loader = DataLoader(train_ds, shuffle=True, num_workers=train_loader_cfg.num_workers, **kwargs)
+    kwargs["shuffle"] = False
+    kwargs["drop_last"] = False
+    val_loader = DataLoader(val_ds, num_workers=eval_loader_cfg.num_workers, **kwargs)
+    test_loader = DataLoader(test_ds, num_workers=eval_loader_cfg.num_workers, **kwargs)
+    return {"train": train_loader, "val": val_loader, "test": test_loader}

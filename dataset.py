@@ -493,3 +493,117 @@ class MultimodalManifestDataset(Dataset[DatasetSample]):
             video_features=video_features,
             labels=labels,
         )
+
+
+# --- Zenodo processed_mosei.pkl (COVAREP 74-dim, FACET 35-dim, Labels [sentiment, happy, sad, anger, surprise, disgust, fear]) ---
+AUDIO_DIM_PKL = 74
+VIDEO_DIM_PKL = 35
+# Map Zenodo label order to TARGET_COLUMNS: happy, sad, angry, fearful, disgust, surprised
+# Zenodo: [sentiment, happy, sad, anger, surprise, disgust, fear] -> indices 1..7
+LABEL_INDEX_PKL = [1, 2, 3, 6, 5, 4]  # happy, sad, angry, fearful, disgust, surprised
+
+
+class MOSEIPklDataset(Dataset[DatasetSample]):
+    """
+    Dataset that loads the Zenodo processed_mosei.pkl (record 17686067).
+    Structure: data[video_id] = list of utterance dicts; each utt has
+    COVAREP["features"] (T_a, 74), FACET["features"] (T_v, 35), Labels["features"] (7,) = [sentiment, happy, sad, anger, surprise, disgust, fear].
+    Returns same DatasetSample format as MultimodalManifestDataset for use with existing collator and model.
+    """
+
+    def __init__(
+        self,
+        pkl_path: Path,
+        split: Literal["train", "val", "test"],
+        train_ratio: float = 0.7,
+        val_ratio: float = 0.15,
+        seed: int = 561,
+        target_columns: Sequence[str] = TARGET_COLUMNS,
+    ) -> None:
+        super().__init__()
+        self.pkl_path = Path(pkl_path)
+        self.split = split
+        self.target_columns = list(target_columns)
+        self._data: Dict[str, list] = {}
+        self._items: List[tuple] = []  # (video_id, utt_index) for this split
+        self._load_and_split(train_ratio, val_ratio, seed)
+
+    def _load_and_split(
+        self,
+        train_ratio: float,
+        val_ratio: float,
+        seed: int,
+    ) -> None:
+        import pickle
+        with open(self.pkl_path, "rb") as f:
+            self._data = pickle.load(f)
+        rng = np.random.default_rng(seed)
+        keys = list(self._data.keys())
+        rng.shuffle(keys)
+        n = len(keys)
+        n_train = int(n * train_ratio)
+        n_val = int(n * val_ratio)
+        train_keys = set(keys[:n_train])
+        val_keys = set(keys[n_train : n_train + n_val])
+        test_keys = set(keys[n_train + n_val :])
+        if self.split == "train":
+            use_keys = train_keys
+        elif self.split == "val":
+            use_keys = val_keys
+        else:
+            use_keys = test_keys
+        self._items = []
+        for vid in use_keys:
+            for utt_idx in range(len(self._data[vid])):
+                self._items.append((vid, utt_idx))
+        LOGGER.info(
+            "MOSEIPklDataset: %s split from %s has %d samples.",
+            self.split,
+            self.pkl_path,
+            len(self._items),
+        )
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: int) -> DatasetSample:
+        vid, utt_idx = self._items[index]
+        utt = self._data[vid][utt_idx]
+        # Audio: COVAREP (T_a, 74)
+        a_feat = utt["COVAREP"]["features"]
+        if isinstance(a_feat, np.ndarray):
+            pass
+        else:
+            a_feat = np.asarray(a_feat, dtype=np.float32)
+        if a_feat.size == 0:
+            a_feat = np.zeros((1, AUDIO_DIM_PKL), dtype=np.float32)
+        a_feat = np.nan_to_num(a_feat, nan=0.0, posinf=0.0, neginf=0.0)
+        audio_features = torch.from_numpy(a_feat).float()
+        # Video: FACET (T_v, 35)
+        v_feat = utt["FACET"]["features"]
+        if isinstance(v_feat, np.ndarray):
+            pass
+        else:
+            v_feat = np.asarray(v_feat, dtype=np.float32)
+        if v_feat.size == 0:
+            v_feat = np.zeros((1, VIDEO_DIM_PKL), dtype=np.float32)
+        v_feat = np.nan_to_num(v_feat, nan=0.0, posinf=0.0, neginf=0.0)
+        video_features = torch.from_numpy(v_feat).float()
+        # Labels: [sentiment, happy, sad, anger, surprise, disgust, fear] -> 6 emotions in TARGET order
+        raw = utt["Labels"]["features"]
+        if hasattr(raw, "flatten"):
+            raw = raw.flatten()
+        raw = np.asarray(raw, dtype=np.float32)
+        if raw.size >= 7:
+            labels_np = raw[LABEL_INDEX_PKL]
+        else:
+            labels_np = np.zeros(6, dtype=np.float32)
+        labels = torch.from_numpy(labels_np).float()
+        return DatasetSample(
+            video_id=vid,
+            utterance_id=str(utt_idx),
+            speaker_id="",
+            audio_features=audio_features,
+            video_features=video_features,
+            labels=labels,
+        )

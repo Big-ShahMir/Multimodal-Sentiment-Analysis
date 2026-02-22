@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -35,14 +36,14 @@ except Exception:
 try:
     from .build_manifest import ManifestBuilder, PipelineConfig
     from .data_loader import CollateConfig, DataLoaderConfig
-    from .datamodule import MERDataModule
+    from .datamodule import MERDataModule, MERDataModulePkl
     from .dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig
     from .lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig
     from .model import AVTCAModel, AVTCAModelConfig
 except ImportError:
     from build_manifest import ManifestBuilder, PipelineConfig  # type: ignore[no-redef]
     from data_loader import CollateConfig, DataLoaderConfig  # type: ignore[no-redef]
-    from datamodule import MERDataModule  # type: ignore[no-redef]
+    from datamodule import MERDataModule, MERDataModulePkl  # type: ignore[no-redef]
     from dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig  # type: ignore[no-redef]
     from lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig  # type: ignore[no-redef]
     from model import AVTCAModel, AVTCAModelConfig  # type: ignore[no-redef]
@@ -64,6 +65,12 @@ def parse_args() -> argparse.Namespace:
 
     # Core paths.
     parser.add_argument("--data_dir", type=Path, default=Path("data"), help="Root data directory.")
+    parser.add_argument(
+        "--pkl_path",
+        type=Path,
+        default=None,
+        help="Path to Zenodo processed_mosei.pkl. If set, training uses this file instead of manifest + raw files.",
+    )
     parser.add_argument(
         "--manifest_path",
         type=Path,
@@ -201,6 +208,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early_stopping_patience", type=int, default=10)
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.0)
     parser.add_argument("--save_top_k", type=int, default=1)
+    parser.add_argument(
+        "--save_weights_only",
+        action="store_true",
+        help="Save only model weights in checkpoints (smaller; no optimizer/scheduler state for resuming).",
+    )
+
+    # High-memory preset (e.g. 44GB+ RAM / large GPU VRAM).
+    parser.add_argument(
+        "--high_memory",
+        action="store_true",
+        help="Use larger batch, model, and workers (batch_size=24, latent_dim=384, num_layers=3, num_workers=8).",
+    )
 
     return parser.parse_args()
 
@@ -271,6 +290,42 @@ def maybe_build_manifest(
         raise FileNotFoundError(f"Split stats not found after manifest build: {split_stats_path}")
 
 
+def build_datamodule_pkl(args: argparse.Namespace, pkl_path: Path) -> MERDataModulePkl:
+    """Build DataModule from Zenodo processed_mosei.pkl (no extractors, fixed dims 74/35)."""
+    train_loader_cfg = DataLoaderConfig(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        shuffle=True,
+        drop_last=False,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=2,
+    )
+    eval_loader_cfg = DataLoaderConfig(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        shuffle=False,
+        drop_last=False,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=2,
+    )
+    collate_cfg = CollateConfig(
+        max_audio_tokens=args.max_audio_tokens,
+        max_video_tokens=args.max_video_tokens,
+        pad_to_multiple_of=args.pad_to_multiple_of,
+    )
+    return MERDataModulePkl(
+        pkl_path=pkl_path,
+        train_loader_cfg=train_loader_cfg,
+        eval_loader_cfg=eval_loader_cfg,
+        collate_cfg=collate_cfg,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        seed=args.seed,
+    )
+
+
 def build_datamodule(args: argparse.Namespace, manifest_path: Path) -> MERDataModule:
     if (not args.freeze_backbones) and args.num_workers > 0:
         LOGGER.warning(
@@ -333,7 +388,7 @@ def build_datamodule(args: argparse.Namespace, manifest_path: Path) -> MERDataMo
     return datamodule
 
 
-def infer_input_dims_from_batch(datamodule: MERDataModule) -> Tuple[int, int]:
+def infer_input_dims_from_batch(datamodule: MERDataModule | MERDataModulePkl) -> Tuple[int, int]:
     loader = datamodule.train_dataloader()
     batch = next(iter(loader))
     audio_dim = int(batch["audio_features"].shape[-1])
@@ -353,34 +408,66 @@ def main() -> None:
     configure_logging()
     args = parse_args()
 
+    # Use log dir for temp files so checkpoint atomic save stays on same filesystem (avoids "Invalid cross-device link" when /tmp is different mount).
+    log_dir = Path(args.log_dir).resolve()
+    ckpt_tmp_dir = log_dir / ".ckpt_tmp"
+    ckpt_tmp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(ckpt_tmp_dir)
+
+    if args.high_memory:
+        args.batch_size = 24
+        args.latent_dim = 384
+        args.num_layers = 3
+        args.num_workers = 8
+        LOGGER.info(
+            "High-memory preset: batch_size=%d, latent_dim=%d, num_layers=%d, num_workers=%d",
+            args.batch_size,
+            args.latent_dim,
+            args.num_layers,
+            args.num_workers,
+        )
+
     seed_everything(args.seed, workers=True)
     torch.set_float32_matmul_precision(args.matmul_precision)
 
-    manifest_path, split_stats_path = resolve_manifest_paths(args)
-    maybe_build_manifest(args=args, manifest_path=manifest_path, split_stats_path=split_stats_path)
+    use_pkl = args.pkl_path is not None
+    if use_pkl:
+        pkl_path = Path(args.pkl_path)
+        if not pkl_path.exists():
+            raise FileNotFoundError(f"--pkl_path not found: {pkl_path}")
 
-    datamodule = build_datamodule(args=args, manifest_path=manifest_path)
-    # Explicitly call setup as requested to ensure data assets are ready and loaders initialized.
-    datamodule.setup(stage="fit")
-
-    class_weights = MERLightningModule.class_weights_from_split_stats(
-        split_stats_path=split_stats_path,
-        target_columns=TARGET_COLUMNS,
-        split="train",
-        strategy=args.class_weight_strategy,
-        min_weight=args.class_weight_min,
-        max_weight=args.class_weight_max,
-        normalize_mean_to_one=args.normalize_class_weights,
-    )
-    LOGGER.info("Loaded class weights: %s", class_weights.tolist())
-
-    audio_dim = args.audio_input_dim
-    video_dim = args.video_input_dim
-    if audio_dim is None or video_dim is None:
-        inferred_audio_dim, inferred_video_dim = infer_input_dims_from_batch(datamodule)
-        audio_dim = inferred_audio_dim if audio_dim is None else audio_dim
-        video_dim = inferred_video_dim if video_dim is None else video_dim
-    LOGGER.info("Using input dims: audio=%d, video=%d", audio_dim, video_dim)
+    if use_pkl:
+        LOGGER.info("Using Zenodo pkl: %s", pkl_path)
+        datamodule = build_datamodule_pkl(args=args, pkl_path=pkl_path)
+        datamodule.setup(stage="fit")
+        # No split_stats for pkl; use uniform class weights.
+        class_weights = torch.ones(len(TARGET_COLUMNS), dtype=torch.float32)
+        LOGGER.info("Using uniform class weights (pkl mode).")
+        audio_dim = args.audio_input_dim if args.audio_input_dim is not None else 74
+        video_dim = args.video_input_dim if args.video_input_dim is not None else 35
+        LOGGER.info("Using input dims: audio=%d, video=%d (pkl)", audio_dim, video_dim)
+    else:
+        manifest_path, split_stats_path = resolve_manifest_paths(args)
+        maybe_build_manifest(args=args, manifest_path=manifest_path, split_stats_path=split_stats_path)
+        datamodule = build_datamodule(args=args, manifest_path=manifest_path)
+        datamodule.setup(stage="fit")
+        class_weights = MERLightningModule.class_weights_from_split_stats(
+            split_stats_path=split_stats_path,
+            target_columns=TARGET_COLUMNS,
+            split="train",
+            strategy=args.class_weight_strategy,
+            min_weight=args.class_weight_min,
+            max_weight=args.class_weight_max,
+            normalize_mean_to_one=args.normalize_class_weights,
+        )
+        LOGGER.info("Loaded class weights: %s", class_weights.tolist())
+        audio_dim = args.audio_input_dim
+        video_dim = args.video_input_dim
+        if audio_dim is None or video_dim is None:
+            inferred_audio_dim, inferred_video_dim = infer_input_dims_from_batch(datamodule)
+            audio_dim = inferred_audio_dim if audio_dim is None else audio_dim
+            video_dim = inferred_video_dim if video_dim is None else video_dim
+        LOGGER.info("Using input dims: audio=%d, video=%d", audio_dim, video_dim)
 
     model_cfg = AVTCAModelConfig(
         audio_input_dim=audio_dim,
@@ -433,6 +520,7 @@ def main() -> None:
         mode=metric_mode,
         save_top_k=args.save_top_k,
         save_last=True,
+        save_weights_only=args.save_weights_only,
         filename="{epoch:02d}-{step:06d}",
     )
     early_stopping = EarlyStopping(
@@ -457,6 +545,14 @@ def main() -> None:
         accumulate_grad_batches=args.accumulate_grad_batches,
         gradient_clip_val=args.gradient_clip_val,
     )
+
+    # Allow loading checkpoints that pickle our config classes (PyTorch 2.6+ weights_only=True).
+    try:
+        torch.serialization.add_safe_globals(
+            [OptimizerConfig, SchedulerConfig, MERLightningModule, AVTCAModelConfig]
+        )
+    except Exception:
+        pass
 
     trainer.fit(model=lightning_module, datamodule=datamodule)
     trainer.test(model=lightning_module, datamodule=datamodule, ckpt_path="best")
