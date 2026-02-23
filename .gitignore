@@ -1,0 +1,20 @@
+# Embedded git repos / external SDKs
+dataset download/CMU-MultimodalSDK/
+
+# Virtual environments
+mer_env/
+*env/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Large data files
+*.csd
+*.h5
+*.hdf5
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

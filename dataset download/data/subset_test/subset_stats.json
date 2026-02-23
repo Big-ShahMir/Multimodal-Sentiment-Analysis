@@ -1,0 +1,116 @@
+{
+  "full": {
+    "num_utterances": 23259,
+    "num_videos": 3293,
+    "utterance_distribution": {
+      "angry": {
+        "count": 2730,
+        "fraction": 0.1173739197729911
+      },
+      "disgust": {
+        "count": 1338,
+        "fraction": 0.057526118921707725
+      },
+      "fearful": {
+        "count": 482,
+        "fraction": 0.02072316092695301
+      },
+      "happy": {
+        "count": 14567,
+        "fraction": 0.6262951975579346
+      },
+      "sad": {
+        "count": 3782,
+        "fraction": 0.16260372328990927
+      },
+      "surprised": {
+        "count": 360,
+        "fraction": 0.015477879530504321
+      }
+    },
+    "video_distribution": {
+      "angry": {
+        "count": 350,
+        "fraction": 0.10628606134224111
+      },
+      "disgust": {
+        "count": 140,
+        "fraction": 0.042514424536896446
+      },
+      "fearful": {
+        "count": 82,
+        "fraction": 0.024901305800182204
+      },
+      "happy": {
+        "count": 2106,
+        "fraction": 0.6395384148193137
+      },
+      "sad": {
+        "count": 589,
+        "fraction": 0.1788642575159429
+      },
+      "surprised": {
+        "count": 26,
+        "fraction": 0.007895535985423625
+      }
+    }
+  },
+  "subset": {
+    "num_utterances": 2236,
+    "num_videos": 329,
+    "fraction_requested": 0.1,
+    "fraction_realized": 0.09990889766170664,
+    "utterance_distribution": {
+      "angry": {
+        "count": 252,
+        "fraction": 0.11270125223613596
+      },
+      "disgust": {
+        "count": 144,
+        "fraction": 0.06440071556350627
+      },
+      "fearful": {
+        "count": 54,
+        "fraction": 0.024150268336314847
+      },
+      "happy": {
+        "count": 1378,
+        "fraction": 0.6162790697674418
+      },
+      "sad": {
+        "count": 377,
+        "fraction": 0.1686046511627907
+      },
+      "surprised": {
+        "count": 31,
+        "fraction": 0.013864042933810376
+      }
+    },
+    "video_distribution": {
+      "angry": {
+        "count": 35,
+        "fraction": 0.10638297872340426
+      },
+      "disgust": {
+        "count": 14,
+        "fraction": 0.0425531914893617
+      },
+      "fearful": {
+        "count": 8,
+        "fraction": 0.0243161094224924
+      },
+      "happy": {
+        "count": 210,
+        "fraction": 0.6382978723404256
+      },
+      "sad": {
+        "count": 59,
+        "fraction": 0.17933130699088146
+      },
+      "surprised": {
+        "count": 3,
+        "fraction": 0.00911854103343465
+      }
+    }
+  }
+}
