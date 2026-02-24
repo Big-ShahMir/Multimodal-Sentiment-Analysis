@@ -1,0 +1,57 @@
+Metadata-Version: 2.4
+Name: mosei-mer-redo
+Version: 0.1.0
+Summary: Multimodal emotion recognition pipeline and MOSEI subset tooling.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: scikit-learn>=1.3
+Requires-Dist: torch>=2.2
+Requires-Dist: torchvision>=0.17
+Requires-Dist: torchaudio>=2.2
+Requires-Dist: torchmetrics>=1.3
+Requires-Dist: lightning>=2.2
+Requires-Dist: transformers>=4.40
+Requires-Dist: tensorboard>=2.14
+Requires-Dist: pyarrow>=14.0
+Requires-Dist: yt-dlp>=2024.3.10
+
+# Multimodal Emotion Recognition (MER) with Bidirectional Cross-Attention
+
+## Overview
+This repository contains a state-of-the-art (SOTA) Multimodal Emotion Recognition (MER) pipeline trained on the CMU-MOSEI dataset. [cite_start]The CMU-MOSEI dataset contains more than 23,500 annotated YouTube monologue segments[cite: 52, 526]. 
+
+To effectively process this data, our model introduces an intermediate transformer-based fusion mechanism. [cite_start]By abandoning legacy static features (like COVAREP and FACET) in favor of dynamic foundation models, and replacing naive data truncation with imbalance-aware loss functions, this architecture robustly predicts continuous emotion intensities across six core categories: Happy, Sad, Angry, Fearful, Disgust, and Surprised[cite: 63, 527].
+
+## Key Features & Upgrades
+* **Full Data Utilization:** We keep all valid utterances instead of deleting data to downsample majority classes. Extreme dataset imbalance is handled algorithmically via Inverse-Sqrt Weighted Huber and MSE loss functions.
+* **Dynamic Foundation Extractors:** Audio is processed dynamically using Hugging Face `Wav2Vec2` or `HuBERT` backbones. Video is processed using `ViT` or `ResNet50` backbones with uniform frame sampling.
+* **Bidirectional Cross-Attention Fusion:** Processing both interactions in parallel creates bidirectional mapping. Audio queries attend to Video key/values, and Video queries attend to Audio key/values simultaneously, followed by a temporal self-attention refinement layer.
+* **SOTA Evaluation Metrics:** We evaluate using Mean Absolute Error (MAE), Pearson Correlation Coefficient (PCC), and Top-K Accuracy to natively handle naturally co-occurring emotions. This avoids the metric degradation seen when coarse binary thresholding amplifies the effects of class imbalance.
+
+## Repository Structure
+* **`build_manifest.py`**: The initial ingestion script that cleans raw CMU-MOSEI data, enforces speaker-independent splits, and calculates class frequency statistics for the loss weights.
+* **`dataset.py` & `data_loader.py`**: Contains the `MultimodalManifestDataset` and custom `collate_fn` for variable-length padding, attention masking, and dynamic foundation model feature extraction.
+* **`model.py`**: The core `AVTCAModel` housing the projection layers, bidirectional cross-attention modules, and temporal pooling prediction heads.
+* **`datamodule.py`**: The PyTorch Lightning DataModule wrapper for streamlined train, validation, and test split orchestration.
+* **`lightning_module.py`**: The training orchestrator containing the SOTA `torchmetrics`, imbalance-aware regression losses, and `SequentialLR` (Linear Warmup + Cosine Annealing) optimizers.
+* **`train.py`**: The CLI-configurable entry point that pieces the modules together and launches the PyTorch Lightning `Trainer`.
+
+## Installation & Setup
+1. Clone this repository and navigate to the root directory.
+2. Install the required dependencies: `pip install -r requirements.txt`
+3. Ensure you have the raw CMU-MOSEI dataset downloaded and accessible.
+
+## Usage
+To train the model from scratch using the default configuration, run the main execution script:
+
+```bash
+python train.py --data_dir /path/to/cmu_mosei --batch_size 16 --learning_rate 1e-4 --max_epochs 50
+```
+
+To fine-tune the foundation model backbones (ensure a low learning rate):
+
+```bash
+python train.py --data_dir /path/to/cmu_mosei --unfreeze_backbones --learning_rate 1e-5
+```
