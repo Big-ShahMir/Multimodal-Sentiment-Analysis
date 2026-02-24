@@ -1,5 +1,7 @@
 # Embedded git repos / external SDKs
 dataset download/CMU-MultimodalSDK/
+dataset download/data/mmsdk/
+
 
 # Virtual environments
 mer_env/
