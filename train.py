@@ -5,19 +5,24 @@ Main training entry point for the multimodal MER pipeline.
 Responsibilities
 ----------------
 1. Parse runtime/config arguments.
-2. Optionally build manifest + split stats.
-3. Instantiate DataModule, core AVT-CA model, and LightningModule wrapper.
+2. Optionally build manifest + split stats (media-path mode).
+3. Support two training modes:
+   - On-the-fly media feature extraction via Dataset/DataModule.
+   - Precomputed .pt feature loading from ETL output manifests.
 4. Configure logger/callbacks and launch training/testing.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
+import pandas as pd
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 try:
     from lightning.pytorch import Trainer, seed_everything
@@ -34,14 +39,14 @@ except Exception:
 
 try:
     from .build_manifest import ManifestBuilder, PipelineConfig
-    from .data_loader import CollateConfig, DataLoaderConfig
+    from .data_loader import BatchDict, CollateConfig, DataLoaderConfig, MultimodalCollator
     from .datamodule import MERDataModule
     from .dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig
     from .lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig
     from .model import AVTCAModel, AVTCAModelConfig
 except ImportError:
     from build_manifest import ManifestBuilder, PipelineConfig  # type: ignore[no-redef]
-    from data_loader import CollateConfig, DataLoaderConfig  # type: ignore[no-redef]
+    from data_loader import BatchDict, CollateConfig, DataLoaderConfig, MultimodalCollator  # type: ignore[no-redef]
     from datamodule import MERDataModule  # type: ignore[no-redef]
     from dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig  # type: ignore[no-redef]
     from lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig  # type: ignore[no-redef]
@@ -49,6 +54,13 @@ except ImportError:
 
 
 LOGGER = logging.getLogger("train")
+PRECOMPUTED_REQUIRED_COLUMNS: Tuple[str, ...] = (
+    "video_id",
+    "utterance_id",
+    "audio_feature_path",
+    "video_feature_path",
+    *TARGET_COLUMNS,
+)
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -68,13 +80,28 @@ def parse_args() -> argparse.Namespace:
         "--manifest_path",
         type=Path,
         default=None,
-        help="Path to manifest file (csv/jsonl/parquet). Defaults to <data_dir>/manifests/mosei_manifest.csv",
+        help=(
+            "Path to manifest file. For media-path mode: csv/jsonl/parquet with audio/video paths. "
+            "For precomputed mode: csv/jsonl/parquet with audio_feature_path/video_feature_path."
+        ),
     )
     parser.add_argument(
         "--split_stats_path",
         type=Path,
         default=None,
         help="Path to split stats JSON. Defaults to <manifest_stem>_split_stats.json.",
+    )
+    parser.add_argument(
+        "--use_precomputed_features",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If true, train from precomputed .pt feature paths instead of raw media paths.",
+    )
+    parser.add_argument(
+        "--precomputed_strict_path_check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If true, validate feature tensor paths exist before each load.",
     )
 
     # Optional manifest build.
@@ -239,7 +266,6 @@ def maybe_build_manifest(
     if suffix == ".jsonl":
         output_format = "jsonl"
     elif suffix not in {".csv", ".jsonl"}:
-        # Keep the training entrypoint simple and deterministic.
         raise ValueError("train.py manifest auto-build supports .csv or .jsonl manifest outputs.")
 
     cfg = PipelineConfig(
@@ -333,8 +359,332 @@ def build_datamodule(args: argparse.Namespace, manifest_path: Path) -> MERDataMo
     return datamodule
 
 
+def _load_manifest(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    if suffix == ".jsonl":
+        return pd.read_json(path, lines=True)
+    if suffix == ".json":
+        try:
+            return pd.read_json(path)
+        except ValueError:
+            return pd.read_json(path, lines=True)
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+    raise ValueError(f"Unsupported manifest format: {path.suffix}")
+
+
+def _stable_hash_to_int(text: str, seed: int) -> int:
+    digest = hashlib.sha256(f"{seed}:{text}".encode("utf-8")).hexdigest()
+    return int(digest, 16)
+
+
+def _compute_split_counts(
+    n_groups: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+) -> Tuple[int, int, int]:
+    if n_groups <= 0:
+        return (0, 0, 0)
+    if n_groups == 1:
+        return (1, 0, 0)
+    if n_groups == 2:
+        return (1, 1, 0)
+
+    counts = [
+        max(1, int(round(n_groups * train_ratio))),
+        max(1, int(round(n_groups * val_ratio))),
+        max(1, int(round(n_groups * test_ratio))),
+    ]
+    while sum(counts) > n_groups:
+        idx = max(range(3), key=lambda i: counts[i])
+        if counts[idx] <= 1:
+            break
+        counts[idx] -= 1
+    while sum(counts) < n_groups:
+        idx = max(range(3), key=lambda i: (train_ratio, val_ratio, test_ratio)[i])
+        counts[idx] += 1
+    return (counts[0], counts[1], counts[2])
+
+
+def _build_video_split_map(
+    video_ids: Sequence[str],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> Dict[str, str]:
+    unique_ids = sorted({str(v).strip() for v in video_ids if str(v).strip()})
+    n = len(unique_ids)
+    if n == 0:
+        return {}
+
+    sorted_ids = sorted(unique_ids, key=lambda v: _stable_hash_to_int(v, seed))
+    n_train, n_val, n_test = _compute_split_counts(n, train_ratio, val_ratio, test_ratio)
+
+    train_ids = sorted_ids[:n_train]
+    val_ids = sorted_ids[n_train : n_train + n_val]
+    test_ids = sorted_ids[n_train + n_val : n_train + n_val + n_test]
+
+    mapping: Dict[str, str] = {}
+    for vid in train_ids:
+        mapping[vid] = "train"
+    for vid in val_ids:
+        mapping[vid] = "val"
+    for vid in test_ids:
+        mapping[vid] = "test"
+
+    for vid in sorted_ids:
+        if vid not in mapping:
+            mapping[vid] = "train"
+    return mapping
+
+
+def ensure_precomputed_split_column(
+    frame: pd.DataFrame,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> pd.DataFrame:
+    ratios_sum = train_ratio + val_ratio + test_ratio
+    if not torch.isclose(torch.tensor(ratios_sum), torch.tensor(1.0), atol=1e-6):
+        raise ValueError(
+            "Split ratios must sum to 1.0. "
+            f"Got train={train_ratio}, val={val_ratio}, test={test_ratio}."
+        )
+    if train_ratio <= 0 or val_ratio <= 0 or test_ratio <= 0:
+        raise ValueError("Split ratios must be positive.")
+
+    out = frame.copy()
+    if "split" in out.columns:
+        split = out["split"].astype("string").str.strip().str.lower()
+    else:
+        split = pd.Series([pd.NA] * len(out), index=out.index, dtype="string")
+
+    allowed = {"train", "val", "test"}
+    needs_fill = split.isna() | (~split.isin(allowed))
+
+    if needs_fill.any():
+        mapping = _build_video_split_map(
+            video_ids=out["video_id"].astype(str).tolist(),
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+        )
+        inferred = out["video_id"].astype(str).map(mapping)
+        split = split.where(~needs_fill, inferred)
+
+    if split.isna().any():
+        raise ValueError("Unable to assign split for all rows in precomputed manifest.")
+    if (~split.isin(allowed)).any():
+        bad_vals = sorted(set(split[~split.isin(allowed)].astype(str).tolist()))
+        raise ValueError(f"Invalid split labels found after processing: {bad_vals}")
+
+    out["split"] = split.astype(str)
+    return out
+
+
+def validate_precomputed_manifest_columns(frame: pd.DataFrame) -> None:
+    missing = [col for col in PRECOMPUTED_REQUIRED_COLUMNS if col not in frame.columns]
+    if missing:
+        raise ValueError(
+            "Precomputed-feature mode requires these columns in manifest: "
+            f"{list(PRECOMPUTED_REQUIRED_COLUMNS)}. Missing: {missing}"
+        )
+
+
+class PrecomputedFeatureDataset(Dataset[Dict[str, torch.Tensor | str]]):
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        target_columns: Sequence[str],
+        strict_path_check: bool = True,
+    ) -> None:
+        super().__init__()
+        self.df = frame.reset_index(drop=True).copy()
+        self.target_columns = list(target_columns)
+        self.strict_path_check = strict_path_check
+        if len(self.df) == 0:
+            raise ValueError("PrecomputedFeatureDataset received an empty dataframe.")
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def _load_feature_tensor(self, path_value: object, column_name: str, row_idx: int) -> torch.Tensor:
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError(f"Row {row_idx} has invalid {column_name}: {path_value!r}")
+        feature_path = Path(path_value)
+        if self.strict_path_check and not feature_path.exists():
+            raise FileNotFoundError(f"{column_name} does not exist: {feature_path}")
+
+        obj = torch.load(str(feature_path), map_location="cpu")
+        if not torch.is_tensor(obj):
+            tensor = torch.as_tensor(obj)
+        else:
+            tensor = obj
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        if tensor.ndim != 2:
+            raise ValueError(
+                f"{column_name} must be a 2D [T, D] tensor after load, got shape={tuple(tensor.shape)}"
+            )
+        return tensor.to(torch.float32)
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor | str]:
+        row = self.df.iloc[index]
+        video_id = str(row["video_id"])
+        utterance_id = str(row["utterance_id"])
+        speaker_id = ""
+        if "speaker_id" in self.df.columns and not pd.isna(row["speaker_id"]):
+            speaker_id = str(row["speaker_id"])
+
+        audio_features = self._load_feature_tensor(row["audio_feature_path"], "audio_feature_path", index)
+        video_features = self._load_feature_tensor(row["video_feature_path"], "video_feature_path", index)
+
+        labels_np = row[self.target_columns].to_numpy(dtype="float32")
+        labels = torch.from_numpy(labels_np)
+
+        return {
+            "video_id": video_id,
+            "utterance_id": utterance_id,
+            "speaker_id": speaker_id,
+            "audio_features": audio_features,
+            "video_features": video_features,
+            "labels": labels,
+        }
+
+
+def build_precomputed_dataloaders(
+    args: argparse.Namespace,
+    manifest_path: Path,
+) -> Tuple[Dict[str, DataLoader[BatchDict]], pd.DataFrame]:
+    df = _load_manifest(manifest_path)
+    validate_precomputed_manifest_columns(df)
+
+    df = df.copy()
+    df["video_id"] = df["video_id"].astype(str)
+    df["utterance_id"] = df["utterance_id"].astype(str)
+    if "speaker_id" not in df.columns:
+        df["speaker_id"] = ""
+
+    df = ensure_precomputed_split_column(
+        frame=df,
+        train_ratio=float(args.manifest_train_ratio),
+        val_ratio=float(args.manifest_val_ratio),
+        test_ratio=float(args.manifest_test_ratio),
+        seed=int(args.seed),
+    )
+
+    split_counts = df["split"].value_counts().to_dict()
+    LOGGER.info("Precomputed manifest split counts: %s", split_counts)
+
+    train_df = df[df["split"] == "train"].copy()
+    val_df = df[df["split"] == "val"].copy()
+    test_df = df[df["split"] == "test"].copy()
+    if train_df.empty:
+        raise ValueError("No train rows found for precomputed-feature mode.")
+    if val_df.empty:
+        raise ValueError("No val rows found for precomputed-feature mode.")
+    if test_df.empty:
+        raise ValueError("No test rows found for precomputed-feature mode.")
+
+    train_ds = PrecomputedFeatureDataset(
+        frame=train_df,
+        target_columns=TARGET_COLUMNS,
+        strict_path_check=bool(args.precomputed_strict_path_check),
+    )
+    val_ds = PrecomputedFeatureDataset(
+        frame=val_df,
+        target_columns=TARGET_COLUMNS,
+        strict_path_check=bool(args.precomputed_strict_path_check),
+    )
+    test_ds = PrecomputedFeatureDataset(
+        frame=test_df,
+        target_columns=TARGET_COLUMNS,
+        strict_path_check=bool(args.precomputed_strict_path_check),
+    )
+
+    collate_cfg = CollateConfig(
+        max_audio_tokens=args.max_audio_tokens,
+        max_video_tokens=args.max_video_tokens,
+        pad_to_multiple_of=args.pad_to_multiple_of,
+    )
+    collate_fn = MultimodalCollator(collate_cfg)
+
+    def make_loader(dataset: Dataset, shuffle: bool) -> DataLoader[BatchDict]:
+        kwargs: Dict[str, object] = {
+            "dataset": dataset,
+            "batch_size": args.batch_size,
+            "shuffle": shuffle,
+            "num_workers": args.num_workers,
+            "pin_memory": True,
+            "drop_last": False,
+            "persistent_workers": bool(args.num_workers > 0),
+            "collate_fn": collate_fn,
+        }
+        if args.num_workers > 0:
+            kwargs["prefetch_factor"] = 2
+        return DataLoader(**kwargs)
+
+    loaders = {
+        "train": make_loader(train_ds, shuffle=True),
+        "val": make_loader(val_ds, shuffle=False),
+        "test": make_loader(test_ds, shuffle=False),
+    }
+    return loaders, df
+
+
+def class_weights_from_manifest(
+    df: pd.DataFrame,
+    target_columns: Sequence[str],
+    split: str,
+    strategy: str,
+    min_weight: float,
+    max_weight: float,
+    normalize_mean_to_one: bool,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    if "split" not in df.columns:
+        raise ValueError("Cannot compute class weights from manifest without a 'split' column.")
+
+    split_df = df[df["split"].astype(str) == split].copy()
+    if split_df.empty:
+        raise ValueError(f"Cannot compute class weights: split '{split}' has zero rows.")
+
+    ratios = []
+    for emotion in target_columns:
+        values = split_df[emotion].astype(float).to_numpy()
+        ratio = float((values > 0.0).mean()) if len(values) else 0.0
+        ratios.append(max(ratio, eps))
+
+    ratio_tensor = torch.tensor(ratios, dtype=torch.float32)
+    if strategy == "inverse_presence":
+        weights = 1.0 / ratio_tensor
+    elif strategy == "inverse_sqrt_presence":
+        weights = 1.0 / torch.sqrt(ratio_tensor)
+    else:
+        raise ValueError(f"Unsupported class weight strategy: {strategy}")
+
+    if normalize_mean_to_one:
+        weights = weights / weights.mean().clamp(min=eps)
+
+    weights = weights.clamp(min=min_weight, max=max_weight)
+    return weights
+
+
 def infer_input_dims_from_batch(datamodule: MERDataModule) -> Tuple[int, int]:
     loader = datamodule.train_dataloader()
+    batch = next(iter(loader))
+    audio_dim = int(batch["audio_features"].shape[-1])
+    video_dim = int(batch["video_features"].shape[-1])
+    return audio_dim, video_dim
+
+
+def infer_input_dims_from_loader(loader: DataLoader[BatchDict]) -> Tuple[int, int]:
     batch = next(iter(loader))
     audio_dim = int(batch["audio_features"].shape[-1])
     video_dim = int(batch["video_features"].shape[-1])
@@ -357,30 +707,63 @@ def main() -> None:
     torch.set_float32_matmul_precision(args.matmul_precision)
 
     manifest_path, split_stats_path = resolve_manifest_paths(args)
-    maybe_build_manifest(args=args, manifest_path=manifest_path, split_stats_path=split_stats_path)
 
-    datamodule = build_datamodule(args=args, manifest_path=manifest_path)
-    # Explicitly call setup as requested to ensure data assets are ready and loaders initialized.
-    datamodule.setup(stage="fit")
+    datamodule: Optional[MERDataModule] = None
+    train_loader: Optional[DataLoader[BatchDict]] = None
+    val_loader: Optional[DataLoader[BatchDict]] = None
+    test_loader: Optional[DataLoader[BatchDict]] = None
 
-    class_weights = MERLightningModule.class_weights_from_split_stats(
-        split_stats_path=split_stats_path,
-        target_columns=TARGET_COLUMNS,
-        split="train",
-        strategy=args.class_weight_strategy,
-        min_weight=args.class_weight_min,
-        max_weight=args.class_weight_max,
-        normalize_mean_to_one=args.normalize_class_weights,
-    )
-    LOGGER.info("Loaded class weights: %s", class_weights.tolist())
+    if args.use_precomputed_features:
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Precomputed manifest not found: {manifest_path}")
 
-    audio_dim = args.audio_input_dim
-    video_dim = args.video_input_dim
-    if audio_dim is None or video_dim is None:
-        inferred_audio_dim, inferred_video_dim = infer_input_dims_from_batch(datamodule)
-        audio_dim = inferred_audio_dim if audio_dim is None else audio_dim
-        video_dim = inferred_video_dim if video_dim is None else video_dim
-    LOGGER.info("Using input dims: audio=%d, video=%d", audio_dim, video_dim)
+        loaders, manifest_df = build_precomputed_dataloaders(args=args, manifest_path=manifest_path)
+        train_loader = loaders["train"]
+        val_loader = loaders["val"]
+        test_loader = loaders["test"]
+
+        class_weights = class_weights_from_manifest(
+            df=manifest_df,
+            target_columns=TARGET_COLUMNS,
+            split="train",
+            strategy=args.class_weight_strategy,
+            min_weight=args.class_weight_min,
+            max_weight=args.class_weight_max,
+            normalize_mean_to_one=args.normalize_class_weights,
+        )
+        LOGGER.info("Loaded class weights from manifest: %s", class_weights.tolist())
+
+        audio_dim = args.audio_input_dim
+        video_dim = args.video_input_dim
+        if audio_dim is None or video_dim is None:
+            inferred_audio_dim, inferred_video_dim = infer_input_dims_from_loader(train_loader)
+            audio_dim = inferred_audio_dim if audio_dim is None else audio_dim
+            video_dim = inferred_video_dim if video_dim is None else video_dim
+        LOGGER.info("Using input dims: audio=%d, video=%d", audio_dim, video_dim)
+    else:
+        maybe_build_manifest(args=args, manifest_path=manifest_path, split_stats_path=split_stats_path)
+
+        datamodule = build_datamodule(args=args, manifest_path=manifest_path)
+        datamodule.setup(stage="fit")
+
+        class_weights = MERLightningModule.class_weights_from_split_stats(
+            split_stats_path=split_stats_path,
+            target_columns=TARGET_COLUMNS,
+            split="train",
+            strategy=args.class_weight_strategy,
+            min_weight=args.class_weight_min,
+            max_weight=args.class_weight_max,
+            normalize_mean_to_one=args.normalize_class_weights,
+        )
+        LOGGER.info("Loaded class weights: %s", class_weights.tolist())
+
+        audio_dim = args.audio_input_dim
+        video_dim = args.video_input_dim
+        if audio_dim is None or video_dim is None:
+            inferred_audio_dim, inferred_video_dim = infer_input_dims_from_batch(datamodule)
+            audio_dim = inferred_audio_dim if audio_dim is None else audio_dim
+            video_dim = inferred_video_dim if video_dim is None else video_dim
+        LOGGER.info("Using input dims: audio=%d, video=%d", audio_dim, video_dim)
 
     model_cfg = AVTCAModelConfig(
         audio_input_dim=audio_dim,
@@ -458,8 +841,18 @@ def main() -> None:
         gradient_clip_val=args.gradient_clip_val,
     )
 
-    trainer.fit(model=lightning_module, datamodule=datamodule)
-    trainer.test(model=lightning_module, datamodule=datamodule, ckpt_path="best")
+    if args.use_precomputed_features:
+        assert train_loader is not None and val_loader is not None and test_loader is not None
+        trainer.fit(
+            model=lightning_module,
+            train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
+        )
+        trainer.test(model=lightning_module, dataloaders=test_loader, ckpt_path="best")
+    else:
+        assert datamodule is not None
+        trainer.fit(model=lightning_module, datamodule=datamodule)
+        trainer.test(model=lightning_module, datamodule=datamodule, ckpt_path="best")
 
 
 if __name__ == "__main__":

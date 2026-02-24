@@ -2,6 +2,8 @@
 dataset download/CMU-MultimodalSDK/
 dataset download/mmsdk/
 dataset download/data/mmsdk/
+mosei_mer_redo.egg-info/
+
 
 
 # Virtual environments
@@ -21,3 +23,9 @@ __pycache__/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# subset_data.py generated artifacts
+dataset download/data/subset_*/raw_videos/
+dataset download/data/subset_*/utterances/
+dataset download/data/subset_*/**/*.part
+dataset download/data/subset_*/**/*.ytdl
