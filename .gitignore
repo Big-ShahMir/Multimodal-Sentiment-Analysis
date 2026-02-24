@@ -1,5 +1,6 @@
 # Embedded git repos / external SDKs
 dataset download/CMU-MultimodalSDK/
+dataset download/mmsdk/
 dataset download/data/mmsdk/
 
 
