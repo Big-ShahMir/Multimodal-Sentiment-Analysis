@@ -31,6 +31,28 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     torchaudio = None  # type: ignore[assignment]
 
 try:
+    import soundfile as _soundfile
+except Exception:  # pragma: no cover - optional dependency at runtime
+    _soundfile = None  # type: ignore[assignment]
+
+
+def _load_audio_sf(path: Path) -> tuple:
+    """Load audio via soundfile (libsndfile), returning (waveform [C,T] float32 Tensor, sample_rate int).
+
+    Falls back to torchaudio.load() if soundfile is unavailable.
+    Avoids torchaudio 2.9+ which routes load() through torchcodec.
+    """
+    if _soundfile is not None:
+        import numpy as np
+        data, sr = _soundfile.read(str(path), dtype="float32", always_2d=True)  # [T, C]
+        waveform = torch.from_numpy(np.ascontiguousarray(data.T))  # [C, T]
+        return waveform, sr
+    if torchaudio is not None:
+        return torchaudio.load(path)
+    raise ImportError("Neither soundfile nor torchaudio is available for audio loading.")
+
+try:
+    import torchvision
     from torchvision.io import read_video
     from torchvision.models import (
         ResNet50_Weights,
@@ -38,6 +60,11 @@ try:
         resnet50,
         vit_b_16,
     )
+    # Force the PyAV backend for read_video.  The default C++ backend requires
+    # system-level FFmpeg shared libraries (libavutil.so) which are not available
+    # in this environment; PyAV (the 'av' pip package) ships its own FFmpeg and
+    # works without system libs.
+    torchvision.set_video_backend("pyav")
 except Exception:  # pragma: no cover - optional dependency at runtime
     read_video = None  # type: ignore[assignment]
     ResNet50_Weights = None  # type: ignore[assignment]
@@ -161,7 +188,7 @@ class AudioFoundationExtractor(nn.Module):
         return self.config.freeze_backbone
 
     def _load_waveform(self, audio_path: Path) -> Tensor:
-        waveform, sample_rate = torchaudio.load(audio_path)
+        waveform, sample_rate = _load_audio_sf(audio_path)
         if waveform.numel() == 0:
             raise ValueError(f"Audio file is empty: {audio_path}")
 

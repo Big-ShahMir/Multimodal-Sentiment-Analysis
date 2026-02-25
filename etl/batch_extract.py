@@ -36,15 +36,15 @@ import pandas as pd
 import torch
 
 try:
-    from .dataset import (
+    from data.dataset import (
         AudioExtractorConfig,
         AudioFoundationExtractor,
         VideoExtractorConfig,
         VideoFoundationExtractor,
     )
-except ImportError:
+except (ImportError, ValueError):
     try:
-        from dataset import (  # type: ignore[no-redef]
+        from ..data.dataset import (  # type: ignore[no-redef]
             AudioExtractorConfig,
             AudioFoundationExtractor,
             VideoExtractorConfig,
@@ -68,9 +68,9 @@ try:
         ensure_tool_available as subset_ensure_tool_available,
         sanitize_for_filename,
     )
-except ImportError:
+except (ImportError, ValueError):
     try:
-        from subset_data import (  # type: ignore[no-redef]
+        from etl.subset_data import (  # type: ignore[no-redef]
             crop_utterance as subset_crop_utterance,
             download_video as subset_download_video,
             ensure_tool_available as subset_ensure_tool_available,

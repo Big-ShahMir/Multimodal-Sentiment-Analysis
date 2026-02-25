@@ -40,10 +40,15 @@ try:
     from .dataset import TARGET_COLUMNS
     from .data_loader import BatchDict
     from .model import AVTCAModel, AVTCAModelConfig
-except ImportError:
-    from dataset import TARGET_COLUMNS  # type: ignore[no-redef]
-    from data_loader import BatchDict  # type: ignore[no-redef]
-    from model import AVTCAModel, AVTCAModelConfig  # type: ignore[no-redef]
+except (ImportError, ValueError):
+    try:
+        from data.dataset import TARGET_COLUMNS  # type: ignore[no-redef]
+        from data.data_loader import BatchDict  # type: ignore[no-redef]
+        from .model import AVTCAModel, AVTCAModelConfig  # type: ignore[no-redef]
+    except ImportError:
+        from data.dataset import TARGET_COLUMNS  # type: ignore[no-redef]
+        from data.data_loader import BatchDict  # type: ignore[no-redef]
+        from model.model import AVTCAModel, AVTCAModelConfig  # type: ignore[no-redef]
 
 
 @dataclass(frozen=True)

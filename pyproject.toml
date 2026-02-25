@@ -23,14 +23,6 @@ dependencies = [
   "yt-dlp>=2024.3.10",
 ]
 
-[tool.setuptools]
-py-modules = [
-  "build_manifest",
-  "datamodule",
-  "dataset",
-  "data_loader",
-  "lightning_module",
-  "model",
-  "subset_data",
-  "train",
-]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["etl*", "data*", "model*"]

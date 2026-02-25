@@ -38,19 +38,19 @@ except Exception:
     from pytorch_lightning.loggers import TensorBoardLogger  # type: ignore[no-redef]
 
 try:
-    from .build_manifest import ManifestBuilder, PipelineConfig
-    from .data_loader import BatchDict, CollateConfig, DataLoaderConfig, MultimodalCollator
-    from .datamodule import MERDataModule
-    from .dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig
-    from .lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig
-    from .model import AVTCAModel, AVTCAModelConfig
-except ImportError:
-    from build_manifest import ManifestBuilder, PipelineConfig  # type: ignore[no-redef]
-    from data_loader import BatchDict, CollateConfig, DataLoaderConfig, MultimodalCollator  # type: ignore[no-redef]
-    from datamodule import MERDataModule  # type: ignore[no-redef]
-    from dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig  # type: ignore[no-redef]
-    from lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig  # type: ignore[no-redef]
-    from model import AVTCAModel, AVTCAModelConfig  # type: ignore[no-redef]
+    from .etl.build_manifest import ManifestBuilder, PipelineConfig
+    from .data.data_loader import BatchDict, CollateConfig, DataLoaderConfig, MultimodalCollator
+    from .data.datamodule import MERDataModule
+    from .data.dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig
+    from .model.lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig
+    from .model.model import AVTCAModel, AVTCAModelConfig
+except (ImportError, ValueError):
+    from etl.build_manifest import ManifestBuilder, PipelineConfig  # type: ignore[no-redef]
+    from data.data_loader import BatchDict, CollateConfig, DataLoaderConfig, MultimodalCollator  # type: ignore[no-redef]
+    from data.datamodule import MERDataModule  # type: ignore[no-redef]
+    from data.dataset import AudioExtractorConfig, TARGET_COLUMNS, VideoExtractorConfig  # type: ignore[no-redef]
+    from model.lightning_module import MERLightningModule, OptimizerConfig, SchedulerConfig  # type: ignore[no-redef]
+    from model.model import AVTCAModel, AVTCAModelConfig  # type: ignore[no-redef]
 
 
 LOGGER = logging.getLogger("train")
